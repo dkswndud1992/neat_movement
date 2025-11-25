@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Topic and frame parameters -->
+  <arg name="odom_topic" default="/odom"/>
+  <arg name="scan_topic" default="/scan"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="base_frame" default="base_link"/>
+
+  <!-- Simple move server node -->
+  <node name="simple_move_server" pkg="neat_movement" type="simple_move_server" output="screen">
+    <param name="odom_topic" value="$(arg odom_topic)"/>
+    <param name="scan_topic" value="$(arg scan_topic)"/>
+    <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+    <param name="base_frame" value="$(arg base_frame)"/>
+  </node>
+
+</launch>

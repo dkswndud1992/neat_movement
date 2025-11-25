@@ -1,0 +1,11 @@
+# goal
+geometry_msgs/PoseStamped target_pose
+bool drive_forward  # true: forward, false: backward
+---
+# result
+bool success
+string message
+---
+# feedback
+geometry_msgs/PoseStamped current_pose
+float32 distance_to_goal
