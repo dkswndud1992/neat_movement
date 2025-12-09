@@ -163,6 +163,16 @@ private:
       return;
     }
 
+    // Phase 3: Rotate to target orientation
+    if (!rotateToTargetOrientation(target, rate, feedback))
+    {
+      result.success = false;
+      result.message = "Final rotation failed or preempted";
+      as_.setAborted(result);
+      stopRobot();
+      return;
+    }
+
     // Success
     stopRobot();
     result.success = true;
@@ -254,11 +264,89 @@ private:
     return false;
   }
 
+  bool rotateToTargetOrientation(const geometry_msgs::PoseStamped& target,
+                                 ros::Rate& rate, neat_movement::SimpleMoveFeedback& feedback)
+  {
+    ROS_INFO("Starting final rotation to target orientation");
+    
+    double prev_error = 0.0;
+    last_cmd_time_ = ros::Time::now();
+
+    while (ros::ok())
+    {
+      if (as_.isPreemptRequested())
+      {
+        return false;
+      }
+
+      // Target yaw from goal pose
+      double target_yaw = tf2::getYaw(target.pose.orientation);
+
+      // Current yaw
+      double current_yaw = tf2::getYaw(current_pose_.pose.orientation);
+
+      // Angular error
+      double error = target_yaw - current_yaw;
+      
+      // Normalize to [-pi, pi]
+      while (error > M_PI) error -= 2.0 * M_PI;
+      while (error < -M_PI) error += 2.0 * M_PI;
+
+      // Check if rotation is complete
+      if (std::abs(error) < config_.rotation_tolerance)
+      {
+        ROS_INFO("Final rotation complete");
+        stopRobot();
+        return true;
+      }
+
+      // PD control
+      double dt = (ros::Time::now() - last_cmd_time_).toSec();
+      if (dt < 0.001) dt = 0.001;
+      
+      double derivative = (error - prev_error) / dt;
+      double angular_vel = config_.rotation_kp * error + config_.rotation_kd * derivative;
+
+      // Apply angular velocity limits
+      angular_vel = std::max(-config_.max_angular_vel, std::min(config_.max_angular_vel, angular_vel));
+
+      // Apply acceleration limits
+      double max_vel_change = config_.max_angular_accel * dt;
+      double vel_diff = angular_vel - current_angular_vel_;
+      if (std::abs(vel_diff) > max_vel_change)
+      {
+        angular_vel = current_angular_vel_ + std::copysign(max_vel_change, vel_diff);
+      }
+
+      // Publish command
+      geometry_msgs::Twist cmd;
+      cmd.angular.z = angular_vel;
+      cmd_vel_pub_.publish(cmd);
+
+      current_angular_vel_ = angular_vel;
+      prev_error = error;
+      last_cmd_time_ = ros::Time::now();
+
+      // Publish feedback
+      feedback.current_pose = current_pose_;
+      double dx = target.pose.position.x - current_pose_.pose.position.x;
+      double dy = target.pose.position.y - current_pose_.pose.position.y;
+      double distance = std::sqrt(dx * dx + dy * dy);
+      feedback.distance_to_goal = distance;
+      as_.publishFeedback(feedback);
+
+      rate.sleep();
+    }
+
+    return false;
+  }
+
   bool driveToTarget(const geometry_msgs::PoseStamped& target, bool drive_forward,
                     ros::Rate& rate, neat_movement::SimpleMoveFeedback& feedback)
   {
     ROS_INFO("Starting drive phase");
     
+    double prev_angular_error = 0.0;
     last_cmd_time_ = ros::Time::now();
 
     while (ros::ok())
@@ -280,6 +368,21 @@ private:
         stopRobot();
         return true;
       }
+
+      // Calculate target direction
+      double target_yaw = std::atan2(dy, dx);
+      if (!drive_forward)
+      {
+        target_yaw = std::atan2(-dy, -dx);
+      }
+
+      // Current yaw
+      double current_yaw = tf2::getYaw(current_pose_.pose.orientation);
+
+      // Angular error for path correction
+      double angular_error = target_yaw - current_yaw;
+      while (angular_error > M_PI) angular_error -= 2.0 * M_PI;
+      while (angular_error < -M_PI) angular_error += 2.0 * M_PI;
 
       // Determine desired speed
       double max_speed = drive_forward ? config_.max_linear_vel_forward : config_.max_linear_vel_backward;
@@ -307,12 +410,31 @@ private:
         desired_speed = current_linear_vel_ + std::copysign(max_vel_change, vel_diff);
       }
 
+      // Calculate corrective angular velocity using PD control
+      double angular_derivative = (angular_error - prev_angular_error) / dt;
+      double angular_vel = config_.rotation_kp * angular_error + config_.rotation_kd * angular_derivative;
+
+      // Limit angular velocity during driving (reduce gain to avoid oscillation)
+      double max_angular_correction = config_.max_angular_vel * 0.5;  // 50% of max during driving
+      angular_vel = std::max(-max_angular_correction, std::min(max_angular_correction, angular_vel));
+
+      // Apply angular acceleration limits
+      double max_angular_vel_change = config_.max_angular_accel * dt;
+      double angular_vel_diff = angular_vel - current_angular_vel_;
+      if (std::abs(angular_vel_diff) > max_angular_vel_change)
+      {
+        angular_vel = current_angular_vel_ + std::copysign(max_angular_vel_change, angular_vel_diff);
+      }
+
       // Publish command
       geometry_msgs::Twist cmd;
       cmd.linear.x = desired_speed;
+      cmd.angular.z = angular_vel;
       cmd_vel_pub_.publish(cmd);
 
       current_linear_vel_ = desired_speed;
+      current_angular_vel_ = angular_vel;
+      prev_angular_error = angular_error;
       last_cmd_time_ = ros::Time::now();
 
       // Publish feedback
